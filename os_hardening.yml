@@ -11,6 +11,6 @@
    - name: Checkout konstruktoid.hardening
      become: true
      ansible.builtin.git:
-       repo: 'https://github.com/konstruktoid/ansible-role-hardening'
+       repo: 'https://github.com/Tamiliplon/konstruktoid.hardening.git'
        dest: /etc/ansible/roles/konstruktoid.hardening
        version: master
