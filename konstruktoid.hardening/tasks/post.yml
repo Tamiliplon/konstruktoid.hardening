@@ -1,4 +1,0 @@
----
-- name: Run all notified handlers
-  ansible.builtin.meta: flush_handlers
-...
