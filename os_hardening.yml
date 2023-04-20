@@ -1,8 +1,16 @@
 ---
 - hosts: localhost
-  any_errors_fatal: true
-  tasks:
-    - name: Include the hardening role
-      ansible.builtin.include_role:
-        name: konstruktoid.hardening
-...
+ any_errors_fatal: true
+ tasks:
+    - name: Install git
+     become: true
+     ansible.builtin.package:
+       name: git
+       state: present
+
+   - name: Checkout konstruktoid.hardening
+     become: true
+     ansible.builtin.git:
+       repo: 'https://github.com/konstruktoid/ansible-role-hardening'
+       dest: /etc/ansible/roles/konstruktoid.hardening
+       version: master
