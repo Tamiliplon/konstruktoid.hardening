@@ -1,0 +1,452 @@
+---
+- name: Verify
+  hosts: all
+  any_errors_fatal: true
+
+  tasks:
+    - name: Reboot host
+      become: true
+      ansible.builtin.reboot:
+
+    - name: Include default vars
+      ansible.builtin.include_vars:
+        dir: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/defaults/"
+        extensions:
+          - 'yml'
+
+    - name: Include host vars
+      ansible.builtin.include_vars:
+        file: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/inventory/host_vars/{{ ansible_hostname }}"
+
+    - name: Set sysctl configuration directory as fact
+      tags:
+        - fact
+        - sysctl
+      block:
+        - name: Stat /usr/lib/sysctl.d/ exists
+          ansible.builtin.stat:
+            path: "/usr/lib/sysctl.d/"
+          register: usr_lib_sysctl_d
+
+        - name: Set sysctl fact
+          ansible.builtin.set_fact:
+            sysctl_conf_dir: "{{ '/usr/lib/sysctl.d' if usr_lib_sysctl_d.stat.exists else '/etc/sysctl.d' }}"
+
+        - name: Debug sysctl
+          ansible.builtin.debug:
+            msg: "{{ sysctl_conf_dir }}"
+
+
+    - name: Stat IPv6 status
+      become: true
+      ansible.builtin.stat:
+        path: /proc/sys/net/ipv6
+      register: stat_ipv6
+
+ 
+    - name: Update current facts
+      ansible.builtin.setup: ~
+
+    - name: Verify auditd configuration
+      become: true
+      ansible.builtin.lineinfile:
+        dest: /etc/audit/auditd.conf
+        line: "{{ item }}"
+        state: present
+      check_mode: true
+      register: auditd_conf
+      failed_when: auditd_conf is changed
+      with_items:
+        - action_mail_acct = {{ auditd_action_mail_acct }}
+        - admin_space_left_action = {{ auditd_admin_space_left_action }}
+        - disk_error_action = {{ auditd_disk_error_action }}
+        - disk_full_action = {{ auditd_disk_full_action }}
+        - max_log_file = {{ auditd_max_log_file }}
+        - max_log_file_action = {{ auditd_max_log_file_action }}
+        - name_format = hostname
+        - num_logs = {{ auditd_num_logs }}
+        - space_left = {{ auditd_space_left }}
+        - space_left_action = {{ auditd_space_left_action }}
+
+    - name: Verify systemd system.conf
+      become: true
+      ansible.builtin.lineinfile:
+        dest: /etc/systemd/system.conf
+        line: "{{ item }}"
+        state: present
+      check_mode: true
+      register: systemd_system_conf
+      failed_when: systemd_system_conf is changed
+      with_items:
+        - DumpCore=no
+        - CrashShell=no
+        - CtrlAltDelBurstAction=none
+        - DefaultLimitCORE=0
+        - DefaultLimitNOFILE={{ limit_nofile_hard }}
+        - DefaultLimitNPROC={{ limit_nproc_hard }}
+
+    - name: Verify systemd user.conf
+      become: true
+      ansible.builtin.lineinfile:
+        dest: /etc/systemd/user.conf
+        line: "{{ item }}"
+        state: present
+      check_mode: true
+      register: systemd_user_conf
+      failed_when: systemd_user_conf is changed
+      with_items:
+        - DefaultLimitCORE=0
+        - DefaultLimitNOFILE={{ limit_nofile_hard }}
+        - DefaultLimitNPROC={{ limit_nproc_hard }}
+
+    - name: Verify postfix configuration
+      become: true
+      ansible.builtin.lineinfile:
+        dest: /etc/postfix/main.cf
+        line: "{{ item }}"
+        state: present
+      check_mode: true
+      register: postfix_conf
+      failed_when: postfix_conf is changed
+      with_items:
+        - disable_vrfy_command = yes
+        - inet_interfaces = loopback-only
+        - smtpd_banner = \$myhostname - ESMTP
+        - smtpd_client_restrictions = permit_mynetworks,reject
+
+
+    - name: Merge sysctl settings
+      ansible.builtin.set_fact:
+        sysctl_settings: "{{ generic_sysctl_settings | combine(ipv4_sysctl_settings) }}"
+
+    - name: Verify sysctl configuration
+      become: true
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -R "^{{ item.key }}.*{{ item.value | int }}$" "{{ sysctl_conf_dir }}/"
+      args:
+        executable: /bin/bash
+      with_dict: "{{ sysctl_settings | dict2items | rejectattr('key', 'search', 'nf_conntrack') | items2dict }}"
+      register: sysctl_file_config
+      failed_when: sysctl_file_config.rc != 0
+      changed_when: sysctl_file_config.rc != 0
+
+    - name: Verify sysctl runtime configuration
+      become: true
+      ansible.builtin.shell: |
+        set -o pipefail
+        sysctl -a | grep "^{{ item.key }}.*{{ item.value | int }}$"
+      args:
+        executable: /bin/bash
+      with_dict: "{{ sysctl_settings | dict2items | rejectattr('key', 'search', 'nf_conntrack') | items2dict }}"
+      register: sysctl_runtime_config
+      failed_when: sysctl_runtime_config.rc != 0
+      changed_when: sysctl_runtime_config.rc != 0
+
+    - name: Stat crypto-policies config
+      become: true
+      ansible.builtin.stat:
+        path: /etc/crypto-policies/config
+      register: crypto_policies_config
+
+    - name: Get crypto-policies value
+      environment:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ansible.builtin.shell: grep "^{{ crypto_policy | upper }}$" /etc/crypto-policies/config
+      register: crypto_policy_set
+      when: crypto_policies_config.stat.exists
+      failed_when: crypto_policy_set.rc != 0
+      changed_when: crypto_policy_set.rc != 0
+
+    - name: Verify noexec /dev/shm
+      ansible.builtin.shell: grep '^tmpfs\s/dev/shm.*noexec' /proc/mounts
+      register: dev_shm_noexec
+      failed_when: dev_shm_noexec.rc != 0
+      changed_when: dev_shm_noexec.rc != 0
+
+    - name: Verify /proc
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -E '^proc\s/proc proc rw,nosuid,nodev,noexec,relatime.*hidepid=({{ hide_pid }}|invisible)' /proc/mounts
+      args:
+        executable: /bin/bash
+      register: proc_opts
+      failed_when: proc_opts.rc != 0
+      changed_when: proc_opts.rc != 0
+      tags:
+        - skip_ansible_lint
+
+    - name: Verify tmp.mount
+      become: true
+      ansible.builtin.systemd:
+        name: tmp.mount
+      register: tmp_mount
+      failed_when: not 'nosuid,nodev,noexec' in tmp_mount.status.Options
+      changed_when: not 'nosuid,nodev,noexec' in tmp_mount.status.Options
+
+    - name: Verify /tmp
+      become: true
+      ansible.builtin.shell: grep '^tmpfs\s/tmp\s.*nosuid,nodev,noexec' /proc/mounts
+      register: mounts_tmp
+      failed_when: mounts_tmp.rc != 0
+      changed_when: mounts_tmp.rc != 0
+
+    - name: Verify login.defs settings
+      become: true
+      ansible.builtin.shell: grep "^{{ item }}$" /etc/login.defs
+      register: login_defs
+      failed_when: login_defs.rc != 0
+      changed_when: login_defs.rc != 0
+      with_items:
+        - ENCRYPT_METHOD SHA512
+        - FAILLOG_ENAB yes
+        - LOG_OK_LOGINS yes
+        - PASS_MAX_DAYS 60
+        - PASS_MIN_DAYS 1
+        - PASS_WARN_AGE 7
+        - SHA_CRYPT_MAX_ROUNDS 65536
+        - SHA_CRYPT_MIN_ROUNDS 10000
+        - SU_NAME su
+        - SYSLOG_SG_ENAB yes
+        - SYSLOG_SU_ENAB yes
+        - UMASK {{ umask_value }}
+
+    - name: Verify pwquality.conf settings
+      become: true
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        line: "{{ item.key }} = {{ item.value }}"
+        state: present
+        mode: "0644"
+        owner: root
+        group: root
+      check_mode: true
+      register: pwquality_conf
+      failed_when: pwquality_conf is changed
+      with_dict: "{{ pwquality_config }}"
+
+    - name: Verify RedHat GRUB audit settings
+      become: true
+      ansible.builtin.shell: |
+        set -o pipefail
+        grubby --info="/boot/vmlinuz-$(uname -r)" | grep "^args.*{{ grub_audit_cmdline }} {{ grub_audit_backlog_cmdline }}"
+      register: audit_grubenv
+      failed_when: audit_grubenv.rc != 0
+      changed_when: audit_grubenv.rc != 0
+      when: ansible_os_family == "RedHat"
+
+    - name: Verify Debian audit GRUB settings
+      become: true
+      ansible.builtin.shell: grep "linux.*{{ grub_audit_cmdline }} {{ grub_audit_backlog_cmdline }}" /boot/grub/grub.cfg
+      register: audit_grub_cfg
+      failed_when: audit_grub_cfg.rc != 0
+      changed_when: audit_grub_cfg.rc != 0
+      when: ansible_os_family == "Debian"
+
+    - name: Verify RedHat GRUB IPv6 settings
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          grubby --info="/boot/vmlinuz-$(uname -r)" | grep "ipv6.disable=1"
+      register: audit_grubenv
+      failed_when: audit_grubenv.rc != 0
+      changed_when: audit_grubenv.rc != 0
+      when: ansible_os_family == "RedHat" and disable_ipv6
+
+    - name: Verify IPv6 sysctl configuration
+      become: true
+      ansible.builtin.shell: grep -R "^{{ item }}$" /etc/sysctl.* /usr/lib/sysctl.d/*
+      register: sysctl_ipv6_config
+      failed_when: sysctl_ipv6_config.rc != 0
+      changed_when: sysctl_ipv6_config.rc != 0
+      with_items:
+        - net.ipv6.conf.all.disable_ipv6=1
+        - net.ipv6.conf.default.disable_ipv6=1
+      when: disable_ipv6
+
+    - name: Verify systemd timesyncd.conf
+      become: true
+      ansible.builtin.shell: grep "^{{ item }}$" /etc/systemd/timesyncd.conf
+      register: systemd_timesyncd_conf
+      failed_when: systemd_timesyncd_conf.rc != 0
+      changed_when: systemd_timesyncd_conf.rc != 0
+      with_items:
+        - NTP={{ ntp }}
+        - FallbackNTP={{ fallback_ntp }}
+      when: enable_timesyncd
+
+    - name: Stat /etc/default/motd-news
+      ansible.builtin.stat:
+        path: /etc/default/motd-news
+      register: motd_news
+
+    - name: Verify masked motdnews service
+      become: true
+      ansible.builtin.systemd:
+        name: motd-news.service
+        masked: true
+        enabled: false
+        state: stopped
+      check_mode: true
+      register: motdnews_service
+      failed_when: motdnews_service is changed
+      when: ansible_os_family == "Debian" and motd_news.stat.exists
+
+    - name: Stat /usr/bin/pro
+      ansible.builtin.stat:
+        path: /usr/bin/pro
+      register: ubuntu_advantage_pro
+      when: ansible_os_family == "Debian"
+
+    - name: Verify that apt_news is disabled
+      ansible.builtin.shell: |
+        set -o pipefail
+        pro config show | grep '^apt_news.*False'
+      args:
+        executable: /bin/bash
+      register: ubuntu_advantage_pro_state
+      changed_when: ubuntu_advantage_pro_state.rc != 0
+      failed_when: ubuntu_advantage_pro_state.rc != 0
+      when: ansible_os_family == "Debian" and ubuntu_advantage_pro.stat.exists
+
+    - name: Efi fact
+      ansible.builtin.set_fact:
+        booted_with_efi: "{{ ansible_mounts | selectattr('mount', 'equalto', '/boot/efi') | list | length > 0 }}"
+
+    - name: Verify cracklib password list
+      environment:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep '/usr/share/dict/passwords' /var/cache/cracklib/src-dicts
+      args:
+        executable: /bin/bash
+      register: cracklib_passwords
+      failed_when: cracklib_passwords.rc != 0
+      changed_when: cracklib_passwords.rc != 0
+      when: ansible_os_family == "Debian"
+
+    - name: Index blacklisted kernel modules
+      environment:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ansible.builtin.shell: |
+        set -o pipefail
+        modprobe -c | grep -o '^blacklist .*' | awk '{print $2}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: modprobe_blacklist.rc != 0
+      register: modprobe_blacklist
+      when: block_blacklisted | bool
+
+    - name: Verify blocked blacklisted kernel modules
+      environment:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep 'install {{ item }} /bin/true' /etc/modprobe.d/blockblacklisted.conf
+      args:
+        executable: /bin/bash
+      register: modprobe_blockblacklisted
+      failed_when: modprobe_blockblacklisted.rc != 0
+      changed_when: modprobe_blockblacklisted.rc != 0
+      with_items:
+        - "{{ modprobe_blacklist.stdout_lines | sort }}"
+      when: block_blacklisted | bool
+
+    - name: Verify sudo settings
+      ansible.builtin.shell: |
+        set -o pipefail
+        sudo -l | grep "{{ item }}"
+      register: sudo_settings
+      failed_when: sudo_settings.rc != 0
+      changed_when: sudo_settings.rc != 0
+      args:
+        executable: /bin/bash
+      with_items:
+        - 'use_pty'
+        - 'logfile="/var/log/sudo.log"'
+        - '!pwfeedback'
+        - '!visiblepw'
+        - 'passwd_timeout=1'
+        - 'timestamp_timeout=5'
+        - 'timestamp_type=tty'
+        - "!rootpw"
+        - "!runaspw"
+        - "!targetpw"
+
+    - name: Stat faillock.conf
+      become: true
+      ansible.builtin.stat:
+        path: /etc/security/faillock.conf
+      register: faillockconf
+
+    - name: Verify faillock.conf
+      become: true
+      ansible.builtin.lineinfile:
+        dest: /etc/security/faillock.conf
+        mode: "0644"
+        state: present
+        line: "{{ item }}"
+      check_mode: true
+      register: verify_faillock
+      failed_when: verify_faillock is changed
+      with_items:
+        - "audit"
+        - "local_users_only"
+        - "deny = 5"
+        - "fail_interval = 900"
+      when: faillockconf.stat.exists
+
+    - name: Stat firewall rules when UFW is enabled
+      become: true
+      ansible.builtin.shell: |
+        set -o pipefail
+        ufw show added | grep '^ufw' | grep -v "'ansible\smanaged'" | sed 's/ufw //g'
+      args:
+        executable: /bin/bash
+      failed_when: ufw_not_managed.rc > 1
+      changed_when: false
+      register: ufw_not_managed
+      when: ufw_enable
+
+    - name: Stat firewall rules when UFW is disabled
+      become: true
+      ansible.builtin.shell: |
+        set -o pipefail
+        ufw show added | grep '^ufw' | grep "'ansible\smanaged'" | sed 's/ufw //g'
+      args:
+        executable: /bin/bash
+      failed_when: ufw_not_managed.rc > 1
+      changed_when: false
+      register: ufw_not_managed
+      when: not ufw_enable
+
+    - name: Create test user
+      become: true
+      ansible.builtin.user:
+        name: roletestuser
+        password: "{{ 'Ansible Role Test User' | password_hash('sha512') }}"
+        state: present
+        shell: /bin/bash
+
+    - name: Create test user salt
+      ansible.builtin.set_fact:
+        test_user_salt: "{{ lookup('password', '/dev/null chars=ascii_lowercase,ascii_uppercase,digits length=16') }}"
+
+    - name: Change test user password
+      become: true
+      ansible.builtin.user:
+        name: roletestuser
+        password: "{{ 'roletestuser' | password_hash('sha512', test_user_salt, rounds=656000) }}"
+      register: test_user_pass
+
+    - name: Debug test user salt
+      ansible.builtin.debug:
+        msg: "{{ test_user_salt }}"
+
+    - name: Debug test user password
+      ansible.builtin.debug:
+        msg: "{{ test_user_pass }}"
+...

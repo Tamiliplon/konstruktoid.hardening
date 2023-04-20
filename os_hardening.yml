@@ -1,0 +1,8 @@
+---
+- hosts: localhost
+  any_errors_fatal: true
+  tasks:
+    - name: Include the hardening role
+      ansible.builtin.include_role:
+        name: konstruktoid.hardening
+...

@@ -1,0 +1,6 @@
+---
+suid_sgid_permissions: true
+suid_sgid_blocklist:
+  - 7z
+  - ab
+...
